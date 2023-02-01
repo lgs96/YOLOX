@@ -52,9 +52,11 @@ def make_parser():
         type=str,
         help="device to run our model, can either be cpu or gpu",
     )
-    parser.add_argument("--conf", default=0.3, type=float, help="test conf")
-    parser.add_argument("--nms", default=0.3, type=float, help="test nms threshold")
-    parser.add_argument("--tsize", default=None, type=int, help="test img size")
+    parser.add_argument("--conf", default=0.25, type=float, help="test conf")
+    parser.add_argument("--nms", default=0.45, type=float, help="test nms threshold")
+    parser.add_argument('--tsize', default=None, type=int, help="test img size")
+
+    
     parser.add_argument(
         "--fp16",
         dest="fp16",
@@ -145,7 +147,13 @@ class Predictor(object):
         ratio = min(self.test_size[0] / img.shape[0], self.test_size[1] / img.shape[1])
         img_info["ratio"] = ratio
 
+        
+        print('Image size: ', img.shape[0], img.shape[1])
+
         img, _ = self.preproc(img, None, self.test_size)
+
+        
+        print('Image size: ', img.shape[0], img.shape[1], img.shape[2])
         img = torch.from_numpy(img).unsqueeze(0)
         img = img.float()
         if self.device == "gpu":

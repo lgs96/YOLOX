@@ -4,6 +4,11 @@
 # user experiments directory
 YOLOX_outputs/
 datasets/
+pretrained_model/
+
+bullet_emulator/YOLOX_outputs/
+bullet_emulator/pretrained_model/
+
 # do not ignore datasets under yolox/data
 !*yolox/data/datasets/
 
