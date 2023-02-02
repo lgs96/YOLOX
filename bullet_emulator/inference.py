@@ -28,6 +28,8 @@ from yolox.utils import (
     xyxy2xywh
 )
 import datetime
+from pycocotools.cocoeval import COCOeval
+from coco_categories import get_categories
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
@@ -114,7 +116,7 @@ def get_image_list(path):
                 image_names.append(apath)
     return image_names
 
-
+# Predictor also measure the performance
 class Predictor(object):
     def __init__(
         self,
@@ -142,6 +144,23 @@ class Predictor(object):
         self.save_folder_name = ''    
         self.image_index = 0
         self.ann_id = 0
+        self.network_detect_queue = []
+        self.network_counter_queue = []
+
+        ## accumulated results for ground truth and detection result
+        self.acc_gt_result = []
+        self.acc_dt_result = []
+    
+        self.null_detect_data = {
+                "image_id": int(0),
+                "category_id": None,
+                "bbox": [],
+                "score": None,
+                "segmentation": [],
+                "id": int(0),
+            }
+
+        self.detect_result = [self.null_detect_data]
 
         self.coco = COCO(os.path.join("/home/sonic/Desktop/VideoAnalytics/YOLOX/coco/annotations/instances_val2017.json"))
         self.class_ids = sorted(self.coco.getCatIds())
@@ -293,37 +312,97 @@ class Predictor(object):
                 "bbox": bboxes[ind].numpy().tolist(),
                 "score": scores[ind].numpy().item(),
                 "segmentation": [],
+                "iscrowd": int(0),
+                "area" : float(0),
                 "id": int(self.ann_id),
             }  # COCO json format
             
+            '''
             detect_data = {
-                "image_id": int(img_id),
+                "image_id": int(img_id + 4),
                 "category_id": label,
                 "bbox": bboxes[ind].numpy().tolist(),
                 "score": scores[ind].numpy().item(),
                 "segmentation": [],
                 "id": int(self.ann_id),
             }  # COCO json format
+            '''
 
             self.ann_id += 1
             gt_ann_list.append(pred_data)
-            dt_ann_list.append(detect_data)
+
+        if bboxes.shape[0] > 0:
+            self.set_detect_result(gt_ann_list)
+        else:
+            self.null_detect_data['image_id'] = int(img_id)
+            self.set_detect_result([self.null_detect_data])
+        dt_ann_list = self.detect_result 
 
         gt_dict["annotations"] = gt_ann_list
-        dt_dict["annotations"] = dt_ann_list
+        gt_dict["categories"] = get_categories()
+
+        if img_id == 0:
+            self.acc_gt_result = gt_dict 
+            self.acc_dt_result = gt_ann_list
+        else:
+            self.acc_gt_result["annotations"].extend(gt_ann_list)
+            self.acc_dt_result.extend(dt_ann_list)
 
         return gt_dict, dt_ann_list
 
-    def record_detect_json (self, outputs, img_info):
+    def record_detect_json (self, outputs, img_info, is_real_time = True):
         output = outputs[0]
         bbox_gt, bbox_dt = self.convert_to_coco_format (output, img_info, self.image_index)
-        if self.image_index == 0:
-            json.dump(bbox_gt, open(self.save_folder_name+'/gt_result.json', 'w'))
-            json.dump(bbox_dt, open(self.save_folder_name+'/dt_result.json', 'w'))
-        else:
-            json.dump(bbox_gt, open(self.save_folder_name+'/gt_result.json', 'w'))
-            json.dump(bbox_dt, open(self.save_folder_name+'/dt_result.json', 'w'))
 
+        img_id = bbox_gt['annotations'][0]['image_id']
+        for bbox in bbox_dt:
+            bbox['image_id'] = img_id
+
+        if is_real_time:
+            file_name = 'result.json'
+        else:
+            file_name = 'acc_result.json'
+
+        json.dump(bbox_gt, open(self.save_folder_name+'/gt_' + file_name, 'w'))
+        json.dump(bbox_dt, open(self.save_folder_name+'/dt_' + file_name, 'w'))
+        
+        self.evaluation(self.save_folder_name+'/gt_' + file_name, self.save_folder_name+'/dt_' + file_name)
+
+    def set_result_delay (self):
+        return
+
+
+    ## 230202 TODO: network_detect_queue append all bbox on index 0 elemenet.. 
+    def set_detect_result (self, gt_ann_list):
+        ## intention: read e2e latency file
+        # to transmit only detect result that device sent
+        #if frame_id == gt_ann_list[0][image_id]:
+
+        delay = 4 #frames, TODO: set_result_delay function
+        self.network_counter_queue.append(delay + 1)
+        self.network_detect_queue.append(gt_ann_list)
+
+        print('Counter queue: ', self.network_counter_queue)
+        print('Net queue: ',len(self.network_detect_queue[0]), len(gt_ann_list))
+
+        for i, counter in enumerate(self.network_counter_queue):
+            self.network_counter_queue[i] = counter - 1
+        if len(self.network_counter_queue) > 0 and self.network_counter_queue[0] == 0:
+            self.network_counter_queue.pop(0)
+            self.detect_result = self.network_detect_queue.pop(0)
+
+    def evaluation (self, gt_json, dt_json):
+        cocoGt = COCO(gt_json)
+        cocoDt = cocoGt.loadRes(dt_json)
+
+        coco_eval = COCOeval(cocoGt, cocoDt, 'bbox')
+        coco_eval.evaluate()
+        coco_eval.accumulate()
+        try:
+            stats = str(coco_eval.stats[0]) + ' ' + str(coco_eval.stats[1])
+            logger.info("mAP (0.5-0.95)/(0.5): {}".format(stats))
+        except:
+            logger.info("No box detected..")
 
 # defined by Goodsol.
 def single_image(predictor, vis_folder, image_name, current_time, save_result, image_index):
