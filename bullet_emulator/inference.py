@@ -8,13 +8,26 @@ import time
 from loguru import logger
 
 import cv2
+import json
 
 import torch
+from collections import ChainMap, defaultdict
 
 from yolox.data.data_augment import ValTransform
 from yolox.data.datasets import COCO_CLASSES
 from yolox.exp import get_exp
 from yolox.utils import fuse_model, get_model_info, postprocess, vis
+
+from pycocotools.coco import COCO
+from yolox.utils import (
+    gather,
+    is_main_process,
+    postprocess,
+    synchronize,
+    time_synchronized,
+    xyxy2xywh
+)
+import datetime
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
@@ -128,6 +141,10 @@ class Predictor(object):
         ## goodsol: save gpu time
         self.save_folder_name = ''    
         self.image_index = 0
+        self.ann_id = 0
+
+        self.coco = COCO(os.path.join("/home/sonic/Desktop/VideoAnalytics/YOLOX/coco/annotations/instances_val2017.json"))
+        self.class_ids = sorted(self.coco.getCatIds())
 
         if trt_file is not None:
             from torch2trt import TRTModule
@@ -175,6 +192,7 @@ class Predictor(object):
             )
             logger.info("Infer time: {:.4f}s".format(time.time() - t0))
             self.record_infer_time(round(time.time() - t0, 4))
+            self.record_detect_json(outputs, img_info)
         return outputs, img_info
 
     def visual(self, output, img_info, cls_conf=0.35):
@@ -202,7 +220,112 @@ class Predictor(object):
             f = open(self.save_folder_name+'/gpu_latency.txt', 'a')
         f.write(str(self.image_index) + '\t' + str(time) +'\n')
 
+    def convert_to_coco_format(self, output, img_info, img_id):
+        gt_dict = {}
+        dt_dict = {}
 
+        gt_image_list = []
+        dt_image_list = []
+
+        gt_ann_list = []
+        dt_ann_list = []
+
+        image_wise_data = defaultdict(dict)
+
+        img_h = img_info["height"]
+        img_w = img_info["width"]
+
+        if output is None:
+            return
+        output = output.cpu()
+
+        bboxes = output[:, 0:4]
+
+        # preprocessing: resize
+        scale = min(
+            self.test_size[0] / float(img_h), self.test_size[1] / float(img_w)
+        )
+        bboxes /= scale
+        cls = output[:, 6]
+        scores = output[:, 4] * output[:, 5]
+
+        image_wise_data.update({
+            int(img_id): {
+                "bboxes": [box.numpy().tolist() for box in bboxes],
+                "scores": [score.numpy().item() for score in scores],
+                "categories": [
+                    self.class_ids[int(cls[ind])]
+                    for ind in range(bboxes.shape[0])
+                ],
+            }
+        })
+
+        bboxes = xyxy2xywh(bboxes)
+
+        file_name = "frame_" + str(img_id)
+        date_time = datetime.datetime.now()
+        formatted_datetime = date_time.isoformat()
+
+        # "images"
+        pred_image = {
+            "id": int(img_id),
+            "width": int(img_w),
+            "height": int(img_h),
+            "file_name": str(file_name),
+            "license": int(0),
+            "flickr_url": None,
+            "coco_url": None,
+            "data_captured": formatted_datetime,
+        }
+
+        dt_image_list.append(pred_image)
+        gt_image_list.append(pred_image)
+
+        dt_dict['images'] = dt_image_list
+        gt_dict['images'] = gt_image_list
+
+        # "annotations"
+        for ind in range(bboxes.shape[0]):
+            label = self.class_ids[int(cls[ind])]
+            pred_data = {
+                "image_id": int(img_id),
+                "category_id": label,
+                "bbox": bboxes[ind].numpy().tolist(),
+                "score": scores[ind].numpy().item(),
+                "segmentation": [],
+                "id": int(self.ann_id),
+            }  # COCO json format
+            
+            detect_data = {
+                "image_id": int(img_id),
+                "category_id": label,
+                "bbox": bboxes[ind].numpy().tolist(),
+                "score": scores[ind].numpy().item(),
+                "segmentation": [],
+                "id": int(self.ann_id),
+            }  # COCO json format
+
+            self.ann_id += 1
+            gt_ann_list.append(pred_data)
+            dt_ann_list.append(detect_data)
+
+        gt_dict["annotations"] = gt_ann_list
+        dt_dict["annotations"] = dt_ann_list
+
+        return gt_dict, dt_ann_list
+
+    def record_detect_json (self, outputs, img_info):
+        output = outputs[0]
+        bbox_gt, bbox_dt = self.convert_to_coco_format (output, img_info, self.image_index)
+        if self.image_index == 0:
+            json.dump(bbox_gt, open(self.save_folder_name+'/gt_result.json', 'w'))
+            json.dump(bbox_dt, open(self.save_folder_name+'/dt_result.json', 'w'))
+        else:
+            json.dump(bbox_gt, open(self.save_folder_name+'/gt_result.json', 'w'))
+            json.dump(bbox_dt, open(self.save_folder_name+'/dt_result.json', 'w'))
+
+
+# defined by Goodsol.
 def single_image(predictor, vis_folder, image_name, current_time, save_result, image_index):
     predictor.image_index = image_index
     predictor.save_folder_name = vis_folder
@@ -342,15 +465,15 @@ def main(exp, args):
     frame_index = 0
     while(True):
         current_path = ''
-        try:
-            current_path = args.path +'frame_'+str(frame_index)+'.jpg'
-            logger.info('Current path: {}'.format(str(current_path)))
-            current_time = time.localtime()
-            single_image(predictor, vis_folder, current_path, current_time, args.save_result, frame_index)
-            frame_index += 1
-        except:
-            logger.info('No remaining frame for inference')
-            break
+
+        current_path = args.path +'frame_'+str(frame_index)+'.jpg'
+        logger.info('Current path: {}'.format(str(current_path)))
+        current_time = time.localtime()
+        single_image(predictor, vis_folder, current_path, current_time, args.save_result, frame_index)
+        frame_index += 1
+        #except:
+        #    logger.info('No remaining frame for inference')
+        #    break
         # we only evaluate on sequential image dataset
         #if args.demo == "image":
         #    image_demo(predictor, vis_folder, args.path, current_time, args.save_result)

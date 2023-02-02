@@ -1,0 +1,1 @@
+python inference.py image --save_result --device gpu
