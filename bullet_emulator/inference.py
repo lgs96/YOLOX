@@ -30,6 +30,7 @@ from yolox.utils import (
 import datetime
 from pycocotools.cocoeval import COCOeval
 from coco_categories import get_categories
+import copy
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
@@ -147,6 +148,12 @@ class Predictor(object):
         self.network_detect_queue = []
         self.network_counter_queue = []
 
+        self.evaluated_frame_num = 0
+        self.sum_mAP_50_95 = 0
+        self.sum_mAP_50 = 0
+
+        self.mAP_file_name = "./perf/mAP_stats.txt"
+
         ## accumulated results for ground truth and detection result
         self.acc_gt_result = []
         self.acc_dt_result = []
@@ -211,7 +218,9 @@ class Predictor(object):
             )
             logger.info("Infer time: {:.4f}s".format(time.time() - t0))
             self.record_infer_time(round(time.time() - t0, 4))
-            self.record_detect_json(outputs, img_info)
+            covert_outputs = copy.deepcopy(outputs)
+            covert_img_info = copy.deepcopy(img_info)
+            self.record_detect_json(covert_outputs, covert_img_info)
         return outputs, img_info
 
     def visual(self, output, img_info, cls_conf=0.35):
@@ -355,10 +364,11 @@ class Predictor(object):
         bbox_gt, bbox_dt = self.convert_to_coco_format (output, img_info, self.image_index)
 
         img_id = bbox_gt['annotations'][0]['image_id']
-        for bbox in bbox_dt:
+        for bbox in bbox_dt:  
             bbox['image_id'] = img_id
 
         if is_real_time:
+            self.evaluated_frame_num += 1
             file_name = 'result.json'
         else:
             file_name = 'acc_result.json'
@@ -378,18 +388,22 @@ class Predictor(object):
         # to transmit only detect result that device sent
         #if frame_id == gt_ann_list[0][image_id]:
 
-        delay = 4 #frames, TODO: set_result_delay function
+        my_list = copy.deepcopy(gt_ann_list)
+
+        delay = 1 #frames, TODO: set_result_delay function
+
         self.network_counter_queue.append(delay + 1)
-        self.network_detect_queue.append(gt_ann_list)
+        self.network_detect_queue.append(my_list)
 
         print('Counter queue: ', self.network_counter_queue)
-        print('Net queue: ',len(self.network_detect_queue[0]), len(gt_ann_list))
 
         for i, counter in enumerate(self.network_counter_queue):
             self.network_counter_queue[i] = counter - 1
+            print('Net queue len: ', len(self.network_detect_queue[i]))
         if len(self.network_counter_queue) > 0 and self.network_counter_queue[0] == 0:
             self.network_counter_queue.pop(0)
             self.detect_result = self.network_detect_queue.pop(0)
+        
 
     def evaluation (self, gt_json, dt_json):
         cocoGt = COCO(gt_json)
@@ -398,9 +412,22 @@ class Predictor(object):
         coco_eval = COCOeval(cocoGt, cocoDt, 'bbox')
         coco_eval.evaluate()
         coco_eval.accumulate()
+        coco_eval.summarize()
         try:
-            stats = str(coco_eval.stats[0]) + ' ' + str(coco_eval.stats[1])
-            logger.info("mAP (0.5-0.95)/(0.5): {}".format(stats))
+            if float(coco_eval.stats[0]) != 0:
+                self.sum_mAP_50_95 += coco_eval.stats[0]
+                self.sum_mAP_50 += coco_eval.stats[1]
+                stats = str(coco_eval.stats[0]) + '\t' + str(coco_eval.stats[1]) + '\t' + str(self.sum_mAP_50_95/self.evaluated_frame_num) + '\t' + str(self.sum_mAP_50/self.evaluated_frame_num)
+                print(stats)
+                if self.evaluated_frame_num == 1:
+                    with open(self.mAP_file_name, "w") as f:
+                        f.write("Current mAP_50_95" + '\t' + "Current mAP_50" + '\t' + "Average mAP_50_95" + '\t' + "Average mAP_50" +'\n'
+                        + stats + '\n')
+                else:
+                    with open(self.mAP_file_name, "a") as f:
+                        f.write(stats + '\n')
+            else:
+                logger.info("No box detected..")
         except:
             logger.info("No box detected..")
 
