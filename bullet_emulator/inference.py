@@ -390,7 +390,7 @@ class Predictor(object):
 
         my_list = copy.deepcopy(gt_ann_list)
 
-        delay = 1 #frames, TODO: set_result_delay function
+        delay = 2 #frames, TODO: set_result_delay function
 
         self.network_counter_queue.append(delay + 1)
         self.network_detect_queue.append(my_list)
